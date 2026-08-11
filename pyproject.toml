@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echoai-voice-io"
+version = "0.1.0"
+description = "EchoAI Module 3A Voice I/O Pipeline"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+	"livekit==1.1.14",
+	"livekit-api>=1.2.0,<2",
+	"deepgram-sdk>=7.6.0,<8",
+	"groq>=0.23.0,<1",
+	"fastapi>=0.115,<1",
+	"uvicorn>=0.34,<1",
+]
+
+[project.scripts]
+echoai-voice-ui = "echoai_voice.ui.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+echoai_voice = ["ui/static/*"]

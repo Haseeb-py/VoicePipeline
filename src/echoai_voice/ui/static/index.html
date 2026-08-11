@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="EchoAI Module 3A real-time voice pipeline testing console">
+    <link rel="icon" href="data:,">
+    <title>EchoAI Voice Lab</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/livekit-client@2.21.0/dist/livekit-client.umd.min.js"></script>
+    <script defer src="/assets/app.js"></script>
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Module 3A · Development Console</p>
+          <h1>Voice pipeline, in the open.</h1>
+          <p class="subtitle">Inspect every turn from microphone input to streamed response audio.</p>
+        </div>
+        <div class="call-controls">
+          <button id="enable-audio" class="button button-audio" type="button" hidden>Enable Audio</button>
+          <button id="start-call" class="button button-primary" type="button">
+            <span class="button-dot"></span>Start Call
+          </button>
+          <button id="end-call" class="button button-secondary" type="button" disabled>End Call</button>
+        </div>
+      </header>
+
+      <section class="control-strip" aria-label="Call configuration and state">
+        <div class="device-controls">
+          <label class="persona-control">
+            <span>Active persona</span>
+            <select id="persona-select" aria-label="Active persona"></select>
+          </label>
+          <label class="persona-control">
+            <span>Microphone</span>
+            <select id="microphone-select" aria-label="Microphone input"></select>
+          </label>
+          <div class="mic-level" aria-label="Live microphone input level">
+            <span>Input level</span>
+            <div class="mic-meter"><i id="mic-meter-bar"></i></div>
+            <strong id="mic-level-label">Idle</strong>
+          </div>
+        </div>
+        <div class="status-cluster">
+          <div class="status-item">
+            <span class="status-label">Connection</span>
+            <span id="connection-status" class="status-value" data-state="disconnected">Disconnected</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Input</span>
+            <span id="listening-status" class="status-value" data-state="idle">Idle</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">AI audio</span>
+            <span id="speaking-status" class="status-value" data-state="silent">Silent</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel transcript-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Speech recognition</p>
+              <h2>Customer transcript</h2>
+            </div>
+            <div id="confidence" class="confidence" title="Deepgram confidence">
+              <span>Confidence</span><strong>—</strong>
+            </div>
+          </div>
+          <div class="transcript-block interim-block">
+            <span class="block-label"><i class="pulse-dot"></i> Live interim</span>
+            <p id="interim-transcript" aria-live="polite">Waiting for speech…</p>
+          </div>
+          <div class="transcript-block final-block">
+            <span class="block-label">Final transcript</span>
+            <p id="final-transcript">No finalized turn yet.</p>
+          </div>
+        </article>
+
+        <article class="panel response-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Groq → Deepgram Aura</p>
+              <h2>AI response</h2>
+            </div>
+            <span id="response-turn" class="turn-chip">No active turn</span>
+          </div>
+          <div class="response-copy">
+            <span class="quote-mark">“</span>
+            <p id="ai-response" aria-live="polite">The generated response will stream here.</p>
+          </div>
+          <div class="audio-progress" aria-hidden="true"><span id="audio-progress-bar"></span></div>
+          <p id="audio-state" class="audio-state">Audio output is idle.</p>
+        </article>
+
+        <article class="panel latency-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Monotonic checkpoints</p>
+              <h2>End-to-end latency</h2>
+            </div>
+            <span id="latency-turn" class="turn-chip">Awaiting turn</span>
+          </div>
+          <div id="latency-metrics" class="metrics-grid">
+            <div class="empty-state">Metrics appear as the real pipeline advances.</div>
+          </div>
+        </article>
+
+        <article class="panel log-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Normalized event stream</p>
+              <h2>Transcript & event log</h2>
+            </div>
+            <button id="clear-log" class="text-button" type="button">Clear</button>
+          </div>
+          <ol id="event-log" class="event-log" aria-live="polite"></ol>
+        </article>
+      </section>
+
+      <footer>
+        <span id="room-label">Room: —</span>
+        <span>Real LiveKit · Deepgram · Groq pipeline</span>
+      </footer>
+      <div id="remote-audio" hidden></div>
+      <div id="toast" class="toast" role="alert" aria-live="assertive"></div>
+    </main>
+  </body>
+</html>
