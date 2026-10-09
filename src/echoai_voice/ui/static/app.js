@@ -226,18 +226,32 @@ async function connectBrowserAudio(credentials) {
   await room.connect(credentials.livekit_url, credentials.participant_token);
   try { await room.startAudio(); } catch (_) { els.enableAudio.hidden = false; }
   const selectedDevice = els.microphone.value;
-  const publication = await room.localParticipant.setMicrophoneEnabled(true, {
+  const supportedAudioConstraints = navigator.mediaDevices.getSupportedConstraints?.() || {};
+  const captureOptions = {
     deviceId: selectedDevice || undefined,
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
-  });
+    channelCount: 1,
+  };
+  // When the browser exposes voice isolation, prefer it over ordinary noise
+  // suppression. It is designed to reduce nearby voices, not only steady
+  // sounds such as fans. Unsupported browsers safely use noiseSuppression.
+  if (supportedAudioConstraints.voiceIsolation) captureOptions.voiceIsolation = true;
+  const publication = await room.localParticipant.setMicrophoneEnabled(true, captureOptions);
   const mediaTrack = publication?.track?.mediaStreamTrack;
   if (!mediaTrack) throw new Error('Chrome did not provide a usable microphone track.');
   await loadMicrophones(mediaTrack.getSettings().deviceId || selectedDevice);
   microphoneTesting = true;
   applySession({ running: true, connection: 'connected', listening: 'idle', speaking: 'silent', room_name: 'echoai-test-room' });
-  addLog('microphone', 'Track published — speak now to verify input level');
+  const microphoneSettings = mediaTrack.getSettings();
+  const isolationActive = microphoneSettings.voiceIsolation === true;
+  addLog(
+    'microphone',
+    isolationActive
+      ? 'Voice isolation active — nearby voices are being reduced'
+      : 'Noise suppression active — use a headset mic for nearby speakers',
+  );
   startMicrophoneMeter(mediaTrack);
   await waitForAudibleInput(15000);
   microphoneTesting = false;
