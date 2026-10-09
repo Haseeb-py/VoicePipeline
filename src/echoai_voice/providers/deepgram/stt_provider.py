@@ -15,6 +15,7 @@ try:
     from deepgram.listen.v1.types.listen_v1results import ListenV1Results
     from deepgram.listen.v1.types.listen_v1speech_started import ListenV1SpeechStarted
     from deepgram.listen.v1.types.listen_v1utterance_end import ListenV1UtteranceEnd
+    from deepgram.listen.v2.types.listen_v2turn_info import ListenV2TurnInfo
 except ModuleNotFoundError:
     AsyncDeepgramClient = None
 
@@ -25,6 +26,9 @@ except ModuleNotFoundError:
         pass
 
     class ListenV1UtteranceEnd:
+        pass
+
+    class ListenV2TurnInfo:
         pass
 
 from echoai_voice.config.settings import AppSettings
@@ -43,16 +47,14 @@ _BARGE_IN_COMMANDS = ("stop", "wait", "hold on", "excuse me", "cancel")
 
 @dataclass(frozen=True, slots=True)
 class DeepgramSttConfig:
-    """Streaming STT settings for Deepgram."""
+    """Flux turn-based streaming STT settings for Deepgram."""
 
-    model: str = "nova-3"
-    language: str = "en-US"
+    model: str = "flux-general-en"
     sample_rate_hz: int = 16000
     channels: int = 1
-    # 250 ms cuts ordinary phrases at brief natural pauses. 500 ms keeps a
-    # question together while delivering the final transcript promptly.
-    endpointing_ms: int = 500
-    utterance_end_ms: str = "1000"
+    eot_threshold: str = "0.8"
+    eot_timeout_ms: str = "1500"
+    audio_chunk_ms: int = 80
 
 
 @dataclass(slots=True)
@@ -169,6 +171,71 @@ class DeepgramStreamingSttProvider:
         if isinstance(message, ListenV1Results) or message_type == "Results":
             await self._handle_results(message)
 
+    async def handle_flux_message(self, message: Any) -> None:
+        """Convert Flux V2 turn events into the pipeline's transcript events."""
+
+        if not isinstance(message, ListenV2TurnInfo) and self._message_type(message) != "TurnInfo":
+            return
+
+        event_name = str(getattr(message, "event", ""))
+        if event_name == "StartOfTurn":
+            self._begin_turn()
+            self._record_latency(LatencyCheckpointName.SPEECH_INPUT_DETECTED)
+            # Flux has already identified a human turn. This is the earliest
+            # reliable moment to interrupt a response without raw-audio VAD.
+            if not self._confirmed_speech_notified:
+                self._confirmed_speech_notified = True
+                await self._notify_subscribers(self._confirmed_speech_subscribers)
+
+        transcript = str(getattr(message, "transcript", "") or "").strip()
+        if not transcript:
+            if event_name == "EndOfTurn":
+                self._complete_turn()
+            return
+
+        confidence = self._flux_confidence(message)
+        now = datetime.now(timezone.utc)
+        window_start = float(getattr(message, "audio_window_start", 0.0) or 0.0)
+        window_end = float(getattr(message, "audio_window_end", window_start) or window_start)
+        event = TranscriptEvent(
+            call_id=self._call_id,
+            turn_id=int(getattr(message, "turn_index", self._turn_id) or self._turn_id) + 1,
+            speaker="customer",
+            text=transcript,
+            is_final=event_name == "EndOfTurn",
+            confidence=confidence,
+            timestamp_start=now - timedelta(seconds=max(window_end - window_start, 0.0)),
+            timestamp_end=now,
+        )
+
+        if event.is_final:
+            self._record_latency(LatencyCheckpointName.STT_FINAL_RECEIVED)
+            await self._publish_final_or_schedule_fallback(event)
+            self._complete_turn()
+        else:
+            self._last_text = transcript
+            self._last_confidence = confidence
+            self._record_latency(LatencyCheckpointName.STT_INTERIM_RECEIVED)
+            await self.transcript_bus.publish(event)
+
+    async def _publish_final_or_schedule_fallback(self, event: TranscriptEvent) -> None:
+        """Publish a trusted final turn, or verify a doubtful one asynchronously."""
+
+        if (
+            event.confidence < self.settings.low_confidence_threshold
+            and self.fallback_service is not None
+            and self._turn_audio
+        ):
+            self._schedule_fallback_if_needed(event)
+            return
+        await self.transcript_bus.publish(event)
+
+    @staticmethod
+    def _flux_confidence(message: Any) -> float:
+        words = getattr(message, "words", None) or []
+        values = [float(getattr(word, "confidence", 0.0) or 0.0) for word in words]
+        return sum(values) / len(values) if values else 0.0
+
     async def _notify_speech_started(self) -> None:
         await self._notify_subscribers(self._speech_started_subscribers)
 
@@ -187,25 +254,22 @@ class DeepgramStreamingSttProvider:
     async def _run(self) -> None:
         try:
             client = AsyncDeepgramClient(api_key=self.settings.deepgram_api_key)
-            logger.info("Starting Deepgram STT session with model=%s", self.config.model)
-            async with client.listen.v1.connect(
+            logger.info("Starting Deepgram Flux STT session with model=%s", self.config.model)
+            async with client.listen.v2.connect(
                 model=self.config.model,
-                language=self.config.language,
-                channels=self.config.channels,
                 encoding="linear16",
                 sample_rate=self.config.sample_rate_hz,
-                interim_results=True,
-                punctuate=True,
-                smart_format=True,
-                endpointing=self.config.endpointing_ms,
-                utterance_end_ms=self.config.utterance_end_ms,
-                vad_events=True,
+                eot_threshold=self.config.eot_threshold,
+                eot_timeout_ms=self.config.eot_timeout_ms,
+                numerals=True,
             ) as socket:
                 self._ready_event.set()
-                sender = asyncio.create_task(self._send_audio(socket), name="deepgram-stt-sender")
+                sender = asyncio.create_task(
+                    self._send_flux_audio(socket), name="deepgram-flux-sender"
+                )
                 receiver = asyncio.create_task(
-                    self._receive_messages(socket),
-                    name="deepgram-stt-receiver",
+                    self._receive_flux_messages(socket),
+                    name="deepgram-flux-receiver",
                 )
                 done, pending = await asyncio.wait(
                     {sender, receiver},
@@ -224,18 +288,34 @@ class DeepgramStreamingSttProvider:
         finally:
             self._ready_event.set()
 
-    async def _send_audio(self, socket: Any) -> None:
+    async def _send_flux_audio(self, socket: Any) -> None:
+        """Send Flux its recommended 80 ms PCM audio chunks."""
+
+        bytes_per_chunk = (
+            self.config.sample_rate_hz
+            * self.config.channels
+            * 2
+            * self.config.audio_chunk_ms
+            // 1000
+        )
+        pending = bytearray()
         while not self._stop_event.is_set():
             chunk = await self._audio_queue.get()
             if chunk is None:
                 break
-            await socket.send_media(chunk.pcm16)
+            pending.extend(chunk.pcm16)
+            while len(pending) >= bytes_per_chunk:
+                await socket.send_media(bytes(pending[:bytes_per_chunk]))
+                del pending[:bytes_per_chunk]
+        if pending:
+            with suppress(Exception):
+                await socket.send_media(bytes(pending))
         with suppress(Exception):
             await socket.send_close_stream()
 
-    async def _receive_messages(self, socket: Any) -> None:
+    async def _receive_flux_messages(self, socket: Any) -> None:
         async for message in socket:
-            await self.handle_deepgram_message(message)
+            await self.handle_flux_message(message)
 
     async def _handle_results(self, result: ListenV1Results) -> None:
         alternative = self._first_alternative(result)
