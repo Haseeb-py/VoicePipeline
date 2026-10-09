@@ -26,6 +26,7 @@ const els = {
 };
 
 let room = null;
+let aiAudioTrack = null;
 let eventSource = null;
 let toastTimer = null;
 let browserReady = false;
@@ -101,6 +102,19 @@ function showToast(message) {
   toastTimer = setTimeout(() => els.toast.classList.remove('visible'), 4500);
 }
 
+function detachAiAudio() {
+  if (aiAudioTrack) aiAudioTrack.detach().forEach((element) => element.remove());
+  els.remoteAudio.replaceChildren();
+}
+
+function attachAiAudio() {
+  if (!aiAudioTrack) return;
+  detachAiAudio();
+  const element = aiAudioTrack.attach();
+  element.autoplay = true;
+  els.remoteAudio.append(element);
+}
+
 function renderLatency(data) {
   els.latencyTurn.textContent = `Turn ${data.turn_id}`;
   els.latency.replaceChildren();
@@ -156,10 +170,12 @@ function listenForPipelineEvents() {
     const event = JSON.parse(data);
     const active = event.state === 'audio_started';
     els.audioProgress.classList.toggle('active', active);
+    if (active) attachAiAudio();
     els.audioState.textContent = active ? 'Streaming real Aura audio to LiveKit…' : 'Audio output completed.';
     addLog('tts', `T${event.turn_id} · ${pretty(event.state)}`);
   });
   eventSource.addEventListener('barge_in', () => {
+    detachAiAudio();
     els.audioProgress.classList.remove('active');
     els.audioState.textContent = 'Playback interrupted by customer speech.';
     addLog('barge-in', 'TTS and queued LiveKit audio cleared');
@@ -185,15 +201,20 @@ async function connectBrowserAudio(credentials) {
     const isAiResponse = participant.identity === 'echoai-server'
       && publication.trackName === 'echoai-response';
     if (track.kind === Track.Kind.Audio && isAiResponse) {
-      const element = track.attach();
-      element.autoplay = true;
-      els.remoteAudio.append(element);
+      aiAudioTrack = track;
+      attachAiAudio();
       addLog('livekit', 'AI outbound audio track subscribed');
     } else if (track.kind === Track.Kind.Audio) {
       addLog('livekit', `Ignored non-AI audio track from ${participant.identity}`);
     }
   });
-  room.on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((element) => element.remove()));
+  room.on(RoomEvent.TrackUnsubscribed, (track) => {
+    track.detach().forEach((element) => element.remove());
+    if (track === aiAudioTrack) {
+      aiAudioTrack = null;
+      els.remoteAudio.replaceChildren();
+    }
+  });
   room.on(RoomEvent.Disconnected, () => addLog('livekit', 'Browser participant disconnected'));
   room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
     els.enableAudio.hidden = room?.canPlaybackAudio !== false;
@@ -306,7 +327,8 @@ async function disconnectBrowserAudio() {
   microphoneTesting = false;
   stopMicrophoneMeter();
   els.enableAudio.hidden = true;
-  els.remoteAudio.replaceChildren();
+  detachAiAudio();
+  aiAudioTrack = null;
 }
 
 els.start.addEventListener('click', async () => {
