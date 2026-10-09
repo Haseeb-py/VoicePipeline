@@ -372,16 +372,23 @@ els.clearLog.addEventListener('click', () => els.log.replaceChildren());
 
 async function initialize() {
   try {
-    const [personas, state] = await Promise.all([api('/api/personas'), api('/api/state')]);
+    const [personas, initialState] = await Promise.all([api('/api/personas'), api('/api/state')]);
     for (const persona of personas) {
       const option = document.createElement('option');
       option.value = persona.id;
       option.textContent = `${persona.name} · ${persona.speech_rate}x`;
       els.persona.append(option);
     }
+    // A refresh closes the page's LiveKit participant. The corresponding
+    // backend call cannot be reused by this new browser page, so close it and
+    // leave Start Call enabled for a clean reconnect.
+    const state = initialState.running
+      ? await api('/api/calls/end', { method: 'POST' })
+      : initialState;
     applySession(state);
     await loadMicrophones();
     listenForPipelineEvents();
+    if (initialState.running) addLog('system', 'Released stale call after page reload');
     addLog('system', 'Phase 7 console connected to backend events');
   } catch (error) { showToast(error.message); }
 }
