@@ -28,6 +28,7 @@ except ModuleNotFoundError:
         pass
 
 from echoai_voice.config.settings import AppSettings
+from echoai_voice.models.fallback import WhisperFallbackResult
 from echoai_voice.models.transcript import TranscriptEvent
 from echoai_voice.providers.livekit.audio_source import AudioFrameChunk
 from echoai_voice.services.transcript_event_bus import TranscriptEventBus
@@ -87,6 +88,8 @@ class DeepgramStreamingSttProvider:
         self._audio_queue = asyncio.Queue()
         self._speech_started_subscribers = []
         self._confirmed_speech_subscribers = []
+        if self.fallback_service is not None:
+            self.fallback_service.subscribe(self._handle_fallback_result)
 
     def subscribe_speech_started(
         self, callback: Callable[[], Awaitable[None] | None]
@@ -261,12 +264,21 @@ class DeepgramStreamingSttProvider:
                     timestamp_start=timestamp_start,
                     timestamp_end=event_time,
                 )
+            low_confidence_final = (
+                is_final
+                and confidence < self.settings.low_confidence_threshold
+                and self.fallback_service is not None
+            )
             self._record_latency(
                 LatencyCheckpointName.STT_FINAL_RECEIVED
                 if is_final
                 else LatencyCheckpointName.STT_INTERIM_RECEIVED
             )
-            await self.transcript_bus.publish(event)
+            # Show interim hypotheses immediately, but never send a doubtful
+            # final transcript to the LLM. Whisper will publish a verified final
+            # event for that turn without blocking the live audio receive loop.
+            if not low_confidence_final:
+                await self.transcript_bus.publish(event)
 
         if is_final and event is not None:
             self._schedule_fallback_if_needed(event)
@@ -287,8 +299,13 @@ class DeepgramStreamingSttProvider:
                 timestamp_start=event_time,
                 timestamp_end=event_time,
             )
-        await self.transcript_bus.publish(event)
-        self._schedule_fallback_if_needed(event)
+        if (
+            self._last_confidence < self.settings.low_confidence_threshold
+            and self.fallback_service is not None
+        ):
+            self._schedule_fallback_if_needed(event)
+        else:
+            await self.transcript_bus.publish(event)
         self._complete_turn()
 
     def _complete_turn(self) -> None:
@@ -313,11 +330,39 @@ class DeepgramStreamingSttProvider:
             self._confirmed_speech_notified = True
             await self._notify_subscribers(self._confirmed_speech_subscribers)
             return
+        # Background sounds can produce plausible interim words. Reserve normal
+        # barge-in for a final transcript; explicit commands above remain fast.
+        if not is_final:
+            return
         letter_count = sum(character.isalpha() for character in transcript)
         if letter_count < 3 or confidence < self.settings.low_confidence_threshold:
             return
         self._confirmed_speech_notified = True
         await self._notify_subscribers(self._confirmed_speech_subscribers)
+
+    async def _handle_fallback_result(self, result: WhisperFallbackResult) -> None:
+        """Publish Whisper's corrected text as the sole final event for a noisy turn."""
+
+        text = result.fallback_text.strip()
+        if not text:
+            logger.warning("Whisper returned an empty fallback transcript for turn=%s", result.turn_id)
+            return
+        now = datetime.now(timezone.utc)
+        await self.transcript_bus.publish(
+            TranscriptEvent(
+                call_id=result.call_id,
+                turn_id=result.turn_id,
+                speaker="customer",
+                text=text,
+                is_final=True,
+                confidence=max(
+                    result.primary_confidence,
+                    self.settings.low_confidence_threshold,
+                ),
+                timestamp_start=now,
+                timestamp_end=now,
+            )
+        )
 
     def _begin_turn(self) -> None:
         if not self._turn_active:
