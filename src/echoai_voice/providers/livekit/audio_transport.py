@@ -35,17 +35,12 @@ class LiveKitAudioTransport:
     _output_queue: asyncio.Queue[tuple[int, TtsAudioChunk] | None] = field(init=False)
     _output_generation: int = field(default=0, init=False)
     _output_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _track_reset_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _output_ready: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _input_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _input_streams: dict[str, Any] = field(default_factory=dict, init=False)
     _playback_started_turns: set[tuple[str, int]] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self._output_queue = asyncio.Queue()
-        # Keeps isolated transport/unit-test instances usable before a real
-        # LiveKit track has been published. Barge-in explicitly clears it.
-        self._output_ready.set()
 
     @property
     def is_running(self) -> bool:
@@ -65,7 +60,22 @@ class LiveKitAudioTransport:
         room.on("track_subscribed", self._on_track_subscribed)
         room.on("track_unsubscribed", self._on_track_unsubscribed)
         self.output_sink.subscribe(self._on_output_chunk)
-        await self._publish_output_track()
+        from livekit import rtc
+
+        self._rtc_output_source = rtc.AudioSource(
+            self.sample_rate,
+            self.channels,
+            queue_size_ms=200,
+        )
+        output_track = rtc.LocalAudioTrack.create_audio_track(
+            "echoai-response",
+            self._rtc_output_source,
+        )
+        publish_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
+        self._output_publication = await room.local_participant.publish_track(
+            output_track,
+            publish_options,
+        )
         self._output_task = asyncio.create_task(
             self._play_output(),
             name="livekit-audio-output",
@@ -78,46 +88,6 @@ class LiveKitAudioTransport:
 
         logger.info("LiveKit audio ingress/egress transport started")
 
-    async def _publish_output_track(self) -> None:
-        """Publish a fresh response track so clients cannot replay stale frames."""
-
-        from livekit import rtc
-
-        room = self._room
-        if room is None:
-            raise RuntimeError("LiveKit audio transport is not connected")
-        source = rtc.AudioSource(self.sample_rate, self.channels, queue_size_ms=200)
-        output_track = rtc.LocalAudioTrack.create_audio_track("echoai-response", source)
-        publication = await room.local_participant.publish_track(
-            output_track,
-            rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
-        )
-        self._rtc_output_source = source
-        self._output_publication = publication
-        self._output_ready.set()
-
-    async def _replace_output_track(self) -> None:
-        """Reset the browser's jitter buffer after a customer interruption."""
-
-        room = self._room
-        old_publication = self._output_publication
-        old_source = self._rtc_output_source
-        self._output_publication = None
-        self._rtc_output_source = None
-        try:
-            if room is not None and old_publication is not None:
-                await room.local_participant.unpublish_track(old_publication.sid)
-            if old_source is not None:
-                await old_source.aclose()
-            if self._room is not None:
-                await self._publish_output_track()
-                logger.info("Replaced LiveKit AI audio track after barge-in")
-        except Exception:
-            logger.exception("Could not replace LiveKit AI audio track after barge-in")
-        finally:
-            # Never leave the output worker blocked during a room shutdown.
-            self._output_ready.set()
-
     async def stop(self) -> None:
         """Stop track readers, playback, and release the published audio source."""
 
@@ -129,13 +99,6 @@ class LiveKitAudioTransport:
         room.off("track_unsubscribed", self._on_track_unsubscribed)
         self.output_sink.unsubscribe(self._on_output_chunk)
         self._clear_output()
-
-        reset_task = self._track_reset_task
-        if reset_task is not None and not reset_task.done():
-            reset_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await reset_task
-        self._track_reset_task = None
 
         for task in tuple(self._input_tasks.values()):
             task.cancel()
@@ -249,12 +212,6 @@ class LiveKitAudioTransport:
     def _on_output_chunk(self, chunk: TtsAudioChunk) -> None:
         if chunk.is_interruption:
             self._clear_output()
-            if self._track_reset_task is None or self._track_reset_task.done():
-                self._output_ready.clear()
-                self._track_reset_task = asyncio.create_task(
-                    self._replace_output_track(),
-                    name="livekit-audio-track-reset",
-                )
             return
         if not chunk.pcm16 and not chunk.is_final:
             return
@@ -278,9 +235,6 @@ class LiveKitAudioTransport:
             if queued is None:
                 return
             generation, chunk = queued
-            if generation != self._output_generation:
-                continue
-            await self._output_ready.wait()
             if generation != self._output_generation:
                 continue
             if chunk.is_final and not chunk.pcm16:
