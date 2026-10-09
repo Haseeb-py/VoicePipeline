@@ -34,7 +34,17 @@ class GroqResponseGenerator:
 
     @staticmethod
     def _messages(request: ResponseRequest) -> list[dict[str, str]]:
-        messages = [{"role": "system", "content": request.system_prompt}]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"{request.system_prompt}\n\n"
+                    "This is a live voice conversation. Give a direct, natural "
+                    "spoken answer in one or two concise sentences, then ask at "
+                    "most one necessary follow-up question."
+                ),
+            }
+        ]
         for turn in request.conversation_history:
             role = "assistant" if turn.speaker == "ai" else "user"
             messages.append({"role": role, "content": turn.text})

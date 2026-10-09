@@ -256,7 +256,10 @@ class DeepgramStreamingTtsProvider:
         flush_count = 0
         async for text in text_chunks:
             buffer += text
-            if len(buffer) >= 180 or re.search(r"[.!?][\"']?\s$", buffer):
+            # Start synthesis at a natural sentence boundary even when the LLM
+            # chunk ends directly in punctuation (the common streaming case).
+            # This avoids waiting for the entire response before audio begins.
+            if len(buffer) >= 120 or re.search(r"[.!?][\"']?(?:\s|$)", buffer):
                 await socket.send_text(SpeakV1Text(text=buffer))
                 await socket.send_flush()
                 flush_count += 1

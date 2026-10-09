@@ -37,6 +37,8 @@ from echoai_voice.models.latency import LatencyCheckpointName
 
 logger = logging.getLogger(__name__)
 
+_BARGE_IN_COMMANDS = ("stop", "wait", "hold on", "excuse me", "cancel")
+
 
 @dataclass(frozen=True, slots=True)
 class DeepgramSttConfig:
@@ -46,7 +48,9 @@ class DeepgramSttConfig:
     language: str = "en-US"
     sample_rate_hz: int = 16000
     channels: int = 1
-    endpointing_ms: int = 250
+    # 250 ms cuts ordinary phrases at brief natural pauses. 500 ms keeps a
+    # question together while delivering the final transcript promptly.
+    endpointing_ms: int = 500
     utterance_end_ms: str = "1000"
 
 
@@ -300,6 +304,14 @@ class DeepgramStreamingSttProvider:
         self, transcript: str, confidence: float, is_final: bool
     ) -> None:
         if self._confirmed_speech_notified:
+            return
+        # Treat explicit interruption commands as reliable immediately. This
+        # arrives on an interim result and stops playback before the customer
+        # has to finish saying their whole replacement question.
+        normalized = transcript.casefold().lstrip(" .,!?-—")
+        if any(normalized.startswith(command) for command in _BARGE_IN_COMMANDS):
+            self._confirmed_speech_notified = True
+            await self._notify_subscribers(self._confirmed_speech_subscribers)
             return
         letter_count = sum(character.isalpha() for character in transcript)
         if letter_count < 3 or confidence < self.settings.low_confidence_threshold:

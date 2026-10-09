@@ -35,8 +35,9 @@ def build_vad_application() -> VadVoiceApplication:
         session_manager=session_manager,
     )
 
-    # Raw VAD can fire on noise. Cancel output only after Deepgram supplies
-    # sufficiently reliable transcript evidence for customer speech.
+    # Use a reliable interim transcript for barge-in rather than raw VAD. Raw
+    # VAD also hears the browser's own speaker playback on many devices and can
+    # cancel an answer as soon as it starts.
     stt_provider.subscribe_confirmed_speech(barge_in.handle_speech_started)
     audio_transport = LiveKitAudioTransport(
         session_manager=session_manager,

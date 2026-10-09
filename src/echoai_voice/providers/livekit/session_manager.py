@@ -66,6 +66,11 @@ class LiveKitSessionManager:
                 self._status.connection = ConnectionState.FAILED
                 raise
 
+            # A remote room close must be reflected in the controller state.
+            # Without this callback the UI keeps Start Call disabled because it
+            # believes a dead connection is still active.
+            self._room.on("disconnected", self._on_room_disconnected)
+
             self._status.connection = ConnectionState.CONNECTED
             self._status.call_id = self._config.identity
             return self._status
@@ -108,6 +113,14 @@ class LiveKitSessionManager:
         """Update the local status to silent mode."""
 
         self._status.speaking = SpeakingState.SILENT
+
+    def _on_room_disconnected(self, *_: object) -> None:
+        """Reflect an unexpected LiveKit disconnect without tearing down callers."""
+
+        self._status.connection = ConnectionState.DISCONNECTED
+        self._status.listening = ListeningState.IDLE
+        self._status.speaking = SpeakingState.SILENT
+        logger.warning("LiveKit room disconnected unexpectedly; call can be restarted.")
 
     async def _connect_room(self) -> object:
         """Connect to LiveKit using the installed SDK when available."""

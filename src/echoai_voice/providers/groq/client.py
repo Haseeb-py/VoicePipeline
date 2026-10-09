@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class GroqClient:
     """Stream real Groq chat completions without exposing provider details upstream."""
 
-    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile") -> None:
+    def __init__(self, api_key: str, model: str = "qwen/qwen3.8-27b") -> None:
         self._api_key = api_key
         self._model = model
         self.last_prompt: str = ""

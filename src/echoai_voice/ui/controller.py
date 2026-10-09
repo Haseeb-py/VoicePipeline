@@ -19,6 +19,7 @@ from echoai_voice.models.response_events import (
     GeneratedResponseChunkEvent,
     GeneratedResponseEvent,
 )
+from echoai_voice.models.session import ConnectionState
 from echoai_voice.models.transcript import TranscriptEvent
 from echoai_voice.models.tts import TtsAudioChunk
 from echoai_voice.services.persona_manager import PersonaUpdate
@@ -72,6 +73,16 @@ class VoiceUiController:
     def is_running(self) -> bool:
         return self._running
 
+    def _call_is_healthy(self) -> bool:
+        """Return whether every component needed for a browser call is alive."""
+
+        return (
+            self._running
+            and self.session_manager.status.connection == ConnectionState.CONNECTED
+            and self._app.base.base.base.stt_provider.is_running
+            and self._app.audio_transport.is_running
+        )
+
     def list_personas(self) -> list[dict[str, Any]]:
         return [
             {
@@ -87,10 +98,11 @@ class VoiceUiController:
     def snapshot(self) -> dict[str, Any]:
         status = self.session_manager.status
         persona = self.persona_manager.get_active_persona()
-        listening = status.listening.value if self._running else "idle"
-        speaking = status.speaking.value if self._running else "silent"
+        running = self._call_is_healthy()
+        listening = status.listening.value if running else "idle"
+        speaking = status.speaking.value if running else "silent"
         return {
-            "running": self._running,
+            "running": running,
             "connection": status.connection.value,
             "listening": listening,
             "speaking": speaking,
@@ -107,16 +119,18 @@ class VoiceUiController:
     async def start_call(self) -> dict[str, Any]:
         async with self._lock:
             if self._running:
-                return {
-                    **self.snapshot(),
-                    **(self._browser_credentials_payload or self.browser_credentials()),
-                }
+                if self._call_is_healthy():
+                    return {
+                        **self.snapshot(),
+                        **(self._browser_credentials_payload or self.browser_credentials()),
+                    }
+                # A provider or room can close independently of the browser.
+                # Discard that stale call graph and let this button press start
+                # a fresh session instead of permanently remaining disabled.
+                await self._recover_stale_call()
 
             if self._has_started:
-                self._app = build_vad_application()
-                self.persona_manager.select_persona(self._selected_persona_id)
-                self._tts_started_turns.clear()
-                self._wire_events()
+                await self._recover_stale_call()
 
             credentials = self._browser_credentials_payload or self.browser_credentials()
             self._app.audio_transport.input_participant_identity = self._browser_identity
@@ -142,6 +156,25 @@ class VoiceUiController:
                 self._watch_status(), name="phase7-status-watch"
             )
             return {**self.snapshot(), **credentials}
+
+    async def _recover_stale_call(self) -> None:
+        """Release a dead call and rebuild the per-call pipeline components."""
+
+        status_task = self._status_task
+        self._status_task = None
+        if status_task is not None:
+            status_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await status_task
+        with suppress(Exception):
+            await stop_vad_call(self._app)
+        self._running = False
+        self._app = build_vad_application()
+        self.persona_manager.select_persona(self._selected_persona_id)
+        self._tts_started_turns.clear()
+        self._wire_events()
+        self._publish("lifecycle", {"state": "recovered"})
+        self._publish_status()
 
     async def end_call(self) -> dict[str, Any]:
         async with self._lock:
@@ -272,6 +305,14 @@ class VoiceUiController:
     async def _watch_status(self) -> None:
         previous: tuple[str, str, str] | None = None
         while self._running:
+            if not self._call_is_healthy():
+                self._running = False
+                self._publish(
+                    "error",
+                    {"message": "Voice connection ended. Start a new call to reconnect."},
+                )
+                self._publish_status()
+                return
             status = self.session_manager.status
             current = (
                 status.connection.value,

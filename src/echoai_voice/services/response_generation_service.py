@@ -35,6 +35,10 @@ class ResponseGenerationService:
     _stream_subscribers: list[ResponseChunkSubscriber] = field(default_factory=list)
     _call_id: str = "pending-call"
     _next_turn_id: int = 1
+    # Deepgram can finalize short phrase fragments before the speaker has
+    # completed a thought. Let the final transcript settle briefly so a later
+    # fragment replaces it before expensive LLM/TTS work begins.
+    finalization_delay_seconds: float = 0.35
     _generation: int = field(default=0, init=False)
     _active_response_task: asyncio.Task[None] | None = field(default=None, init=False)
 
@@ -84,11 +88,21 @@ class ResponseGenerationService:
         self._generation += 1
         generation = self._generation
         task = asyncio.create_task(
-            self._generate_for_event(event, generation),
+            self._generate_after_finalization(event, generation),
             name=f"response-generation-turn-{event.turn_id}",
         )
         self._active_response_task = task
         task.add_done_callback(self._response_task_done)
+
+    async def _generate_after_finalization(
+        self, event: TranscriptEvent, generation: int
+    ) -> None:
+        """Wait briefly for a trailing final transcript before answering."""
+
+        await asyncio.sleep(self.finalization_delay_seconds)
+        if generation != self._generation:
+            return
+        await self._generate_for_event(event, generation)
 
     async def handle_transcript_event(self, event: TranscriptEvent) -> None:
         """Handle transcript events and generate responses only for final customer turns."""

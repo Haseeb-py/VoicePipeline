@@ -56,7 +56,10 @@ def get_settings() -> AppSettings:
     return AppSettings(
         deepgram_api_key=os.getenv("DEEPGRAM_API_KEY", ""),
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
-        groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        # Keep this aligned with a generally available Groq production model.
+        # The previous Llama model was retired and caused every response request
+        # to fail with a 404 before any TTS audio could be generated.
+        groq_model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
         whisper_model=os.getenv("WHISPER_MODEL", "whisper-large-v3-turbo"),
         livekit_url=os.getenv("LIVEKIT_URL", ""),
         livekit_api_key=os.getenv("LIVEKIT_API_KEY", ""),

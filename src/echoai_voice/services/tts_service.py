@@ -170,8 +170,11 @@ class TtsService:
             logger.info("Cancelling active TTS task for barge-in interruption.")
             self._active_synthesis_task = None
             task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            # Do not let a slow provider shutdown block the STT receive loop.
+            # Audio has already been flushed above; the cancelled task will run
+            # its own cleanup when the event loop next schedules it.
+            with suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
 
         text_queue = self._active_text_queue
         self._active_text_queue = None
@@ -180,7 +183,12 @@ class TtsService:
                 with suppress(asyncio.QueueEmpty):
                     text_queue.get_nowait()
             await text_queue.put(None)
-        await self.tts_provider.cancel_current_synthesis()
+        # Deepgram's Clear acknowledgement is useful, but it must not hold the
+        # call in an interruption state if the provider is slow to acknowledge.
+        with suppress(asyncio.CancelledError, TimeoutError):
+            await asyncio.wait_for(
+                self.tts_provider.cancel_current_synthesis(), timeout=0.25
+            )
 
         self.session_manager.mark_silent()
         return cancelled_active_stream
