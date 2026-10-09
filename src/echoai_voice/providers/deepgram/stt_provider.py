@@ -177,7 +177,7 @@ class DeepgramStreamingSttProvider:
         if not isinstance(message, ListenV2TurnInfo) and self._message_type(message) != "TurnInfo":
             return
 
-        event_name = str(getattr(message, "event", ""))
+        event_name = str(self._flux_value(message, "event", ""))
         if event_name == "StartOfTurn":
             self._begin_turn()
             self._record_latency(LatencyCheckpointName.SPEECH_INPUT_DETECTED)
@@ -187,7 +187,7 @@ class DeepgramStreamingSttProvider:
                 self._confirmed_speech_notified = True
                 await self._notify_subscribers(self._confirmed_speech_subscribers)
 
-        transcript = str(getattr(message, "transcript", "") or "").strip()
+        transcript = str(self._flux_value(message, "transcript", "") or "").strip()
         if not transcript:
             if event_name == "EndOfTurn":
                 self._complete_turn()
@@ -195,11 +195,13 @@ class DeepgramStreamingSttProvider:
 
         confidence = self._flux_confidence(message)
         now = datetime.now(timezone.utc)
-        window_start = float(getattr(message, "audio_window_start", 0.0) or 0.0)
-        window_end = float(getattr(message, "audio_window_end", window_start) or window_start)
+        window_start = float(self._flux_value(message, "audio_window_start", 0.0) or 0.0)
+        window_end = float(
+            self._flux_value(message, "audio_window_end", window_start) or window_start
+        )
         event = TranscriptEvent(
             call_id=self._call_id,
-            turn_id=int(getattr(message, "turn_index", self._turn_id) or self._turn_id) + 1,
+            turn_id=int(self._flux_value(message, "turn_index", self._turn_id)) + 1,
             speaker="customer",
             text=transcript,
             is_final=event_name == "EndOfTurn",
@@ -232,9 +234,18 @@ class DeepgramStreamingSttProvider:
 
     @staticmethod
     def _flux_confidence(message: Any) -> float:
-        words = getattr(message, "words", None) or []
-        values = [float(getattr(word, "confidence", 0.0) or 0.0) for word in words]
+        words = DeepgramStreamingSttProvider._flux_value(message, "words", []) or []
+        values = [
+            float(DeepgramStreamingSttProvider._flux_value(word, "confidence", 0.0) or 0.0)
+            for word in words
+        ]
         return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _flux_value(message: Any, key: str, default: Any) -> Any:
+        if isinstance(message, dict):
+            return message.get(key, default)
+        return getattr(message, key, default)
 
     async def _notify_speech_started(self) -> None:
         await self._notify_subscribers(self._speech_started_subscribers)
@@ -480,6 +491,8 @@ class DeepgramStreamingSttProvider:
 
     @staticmethod
     def _message_type(message: Any) -> str:
+        if isinstance(message, dict):
+            return str(message.get("type", ""))
         return str(getattr(message, "type", message.__class__.__name__))
 
     @staticmethod
