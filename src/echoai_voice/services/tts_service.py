@@ -183,11 +183,15 @@ class TtsService:
                 with suppress(asyncio.QueueEmpty):
                     text_queue.get_nowait()
             await text_queue.put(None)
-        # Deepgram's Clear acknowledgement is useful, but it must not hold the
-        # call in an interruption state if the provider is slow to acknowledge.
+        # Do not begin a later turn on the same persistent TTS socket until
+        # Deepgram has acknowledged its Clear.  A 250 ms best-effort wait let a
+        # late audio packet from the interrupted turn land at the beginning of
+        # the next answer on slower connections.  This happens while the
+        # customer is still speaking, so the bounded acknowledgement wait does
+        # not add perceived answer latency.
         with suppress(asyncio.CancelledError, TimeoutError):
             await asyncio.wait_for(
-                self.tts_provider.cancel_current_synthesis(), timeout=0.25
+                self.tts_provider.cancel_current_synthesis(), timeout=1.2
             )
 
         self.session_manager.mark_silent()
